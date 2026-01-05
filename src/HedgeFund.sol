@@ -43,6 +43,7 @@ contract HedgeFund is ERC20, Ownable, Pausable, ReentrancyGuardTransient {
     error InvalidAssetDecimals(uint8 decimals);
     error FeeTooHigh();
     error InvalidSharePrice();
+    error DepositHardcapExceeded(uint256 hardcap, uint256 nextTotal);
 
     event DepositQueued(address indexed user, uint256 indexed tokenId, uint256 assets, uint64 epoch);
     event WithdrawQueued(address indexed user, uint256 indexed tokenId, uint256 shares, uint64 epoch);
@@ -65,6 +66,7 @@ contract HedgeFund is ERC20, Ownable, Pausable, ReentrancyGuardTransient {
         uint256 managementFeeShares,
         uint256 performanceFeeShares
     );
+    event DepositHardcapUpdated(uint256 hardcap);
 
     uint256 private constant PRICE_SCALE = 1e18;
     uint256 private constant YEAR = 365 days;
@@ -82,6 +84,7 @@ contract HedgeFund is ERC20, Ownable, Pausable, ReentrancyGuardTransient {
     uint256 public pendingDeposits;
     uint256 public pendingWithdraw;
     uint256 public withdrawReserveAssets;
+    uint256 public depositHardcap;
 
     mapping(uint256 => QueuePosition) public positions;
     mapping(uint64 => Epoch) public epochs;
@@ -129,11 +132,23 @@ contract HedgeFund is ERC20, Ownable, Pausable, ReentrancyGuardTransient {
         _unpause();
     }
 
+    /// @notice Owner may update the deposit hardcap (0 disables the cap).
+    function setDepositHardcap(uint256 hardcap) external onlyOwner {
+        depositHardcap = hardcap;
+        emit DepositHardcapUpdated(hardcap);
+    }
+
     /// @notice Queue an asset deposit.
     function deposit(uint256 assets) external nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
         uint64 epochId = currentEpoch + 1;
         _executeClaim(msg.sender);
+
+        uint256 hardcap = depositHardcap;
+        if (hardcap != 0) {
+            uint256 nextTotal = pendingDeposits + assets;
+            if (nextTotal > hardcap) revert DepositHardcapExceeded(hardcap, nextTotal);
+        }
 
         ASSET.safeTransferFrom(msg.sender, address(this), assets);
         uint256 tokenId = QUEUE.mint(msg.sender);

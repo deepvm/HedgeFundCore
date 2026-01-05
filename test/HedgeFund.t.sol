@@ -66,6 +66,48 @@ contract HedgeFundTest is Test {
         assertEq(queue.balanceOf(user), 0);
     }
 
+    function testDepositHardcapBlocksExcess() public {
+        uint256 hardcap = 150 * USDT_DECIMALS;
+
+        vm.prank(owner);
+        fund.setDepositHardcap(hardcap);
+
+        uint256 firstDeposit = 100 * USDT_DECIMALS;
+        vm.prank(user);
+        fund.deposit(firstDeposit);
+
+        address user2 = _makeUser("user2", 1000 * USDT_DECIMALS);
+
+        uint256 secondDeposit = 60 * USDT_DECIMALS;
+        vm.prank(user2);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                HedgeFund.DepositHardcapExceeded.selector,
+                hardcap,
+                firstDeposit + secondDeposit
+            )
+        );
+        fund.deposit(secondDeposit);
+    }
+
+    function testDepositHardcapAllowsExact() public {
+        uint256 hardcap = 150 * USDT_DECIMALS;
+
+        vm.prank(owner);
+        fund.setDepositHardcap(hardcap);
+
+        vm.prank(user);
+        fund.deposit(100 * USDT_DECIMALS);
+
+        address user2 = _makeUser("user2", 1000 * USDT_DECIMALS);
+
+        uint256 secondDeposit = 50 * USDT_DECIMALS;
+        vm.prank(user2);
+        fund.deposit(secondDeposit);
+
+        assertEq(fund.pendingDeposits(), hardcap);
+    }
+
     function testWithdrawFlow() public {
         uint256 amount = 200 * USDT_DECIMALS;
         uint256 startingBalance = usdt.balanceOf(user);
@@ -423,5 +465,14 @@ contract HedgeFundTest is Test {
         uint256 slot =
             stdstore.target(address(usdt)).sig("allowance(address,address)").with_key(_owner).with_key(_spender).find();
         vm.store(address(usdt), bytes32(slot), bytes32(_amount));
+    }
+
+    function _makeUser(string memory label_, uint256 amount) internal returns (address userAddr) {
+        userAddr = makeAddr(label_);
+        if (userAddr.code.length != 0) {
+            vm.etch(userAddr, "");
+        }
+        _setBalance(userAddr, amount);
+        _setAllowance(userAddr, address(fund), type(uint256).max);
     }
 }
