@@ -1,67 +1,163 @@
 # HedgeFundCore
 
-- `HedgeFund`: a compact ERC4626 vault share token.
+`HedgeFund` is a small async vault for USDT-like assets.
 
-The owner, expected to be the Safe multisig, reports a target share price that already includes all off-chain accounting and fees.
+Users do not get shares immediately after sending USDT. They create a deposit request, wait until the owner settles the next epoch price, and then claim shares. Exits work the same way: users lock shares with a redeem request, wait for the next settled price, and then claim USDT.
 
-Key mechanics:
+The contract is built around the ERC-7540 request flow, but it stays much smaller than full products like Lagoon or Centrifuge. There are no external managers, whitelist modules, upgradeable proxy stack, or NFT positions.
 
-- **Immediate entry**: `deposit` and `mint` mint shares at the current effective `sharePrice()`, then forward assets to the owner Safe.
-- **Configurable price vesting**: positive price updates vest linearly over the seconds passed to `setSharePrice`. Price decreases apply immediately.
-- **Async-only exit**: `withdraw` and `redeem` are disabled. Users exit with `requestRedeem`, which burns shares and fixes the assets owed.
-- **Off-chain accounting**: owner updates the target price with `setSharePrice(newSharePrice, vestingSeconds)`, scaled by `1e18`.
-- **Redeem**: pending redemptions are tracked by `pendingRedeemAssets[account]`.
-- **Claim funding**: the owner Safe funds the vault before users call `claimRedeem`.
+## Roles
 
-## User Flows
+`owner` is expected to be the Safe multisig. It sets the epoch price and can update the deposit limit and liquidity vault.
 
-### Deposit
+`liquidityVault` is the address that receives extra USDT after settlement and funds redemption deficits. It defaults to `owner`, but can be changed with `setLiquidityVault`.
 
-Users enter through the standard ERC4626 `deposit(assets, receiver)` or `mint(shares, receiver)` functions.
+Users control their own requests. They can also approve an ERC-7540 operator with `setOperator`.
 
-The vault uses the current effective `sharePrice()` to calculate the share amount. Assets are transferred directly from the user to the owner Safe, and shares are minted to `receiver` in the same transaction.
+Operators can claim and redeem on behalf of a user, but they cannot initiate a deposit that pulls the user's USDT. Deposits must be started by the token owner.
 
-Example:
+## How Deposits Work
 
-```text
-user -> deposit(assets, receiver)
-vault -> calculates shares at sharePrice()
-asset -> moves user to owner Safe
-shares -> mint to receiver
+A user calls:
+
+```solidity
+requestDeposit(assets)
 ```
 
-### Redeem Request
+The USDT moves into the contract, but no shares are minted yet. The request goes into `currentEpoch + 1`.
 
-Synchronous ERC4626 exits are disabled: `maxWithdraw()` and `maxRedeem()` return `0`, so `withdraw()` and `redeem()` revert.
+When the owner later calls:
 
-Users exit with `requestRedeem(shares)`. The vault converts shares to assets at the current effective `sharePrice()`, burns the shares immediately, and stores the fixed asset amount in `pendingRedeemAssets[user]`.
-
-After `requestRedeem`, the user no longer holds those shares and does not receive future price increases on them.
-
-Example:
-
-```text
-user -> requestRedeem(shares)
-vault -> assets = previewRedeem(shares)
-shares -> burn from user
-pendingRedeemAssets[user] += assets
-totalPendingRedeemAssets += assets
+```solidity
+settleEpoch(newSharePrice)
 ```
 
-### Claim Redeem
+the contract converts all deposit requests from that epoch into claimable shares using the new price. The user can then claim shares with:
 
-`requestRedeem` only records the amount owed. It does not transfer assets immediately.
-
-The owner Safe should monitor `totalPendingRedeemAssets` and send enough asset tokens to the vault. Once funded, users call `claimRedeem()` to receive their fixed pending amount.
-
-Example:
-
-```text
-owner Safe -> transfers totalPendingRedeemAssets to vault
-user -> claimRedeem()
-vault -> transfers pendingRedeemAssets[user] to user
-pendingRedeemAssets[user] = 0
+```solidity
+deposit(assets, receiver)
+mint(shares, receiver)
 ```
+
+Claiming is optional. If a user does not need the ERC20 shares in their wallet, the shares can stay claimable inside the vault.
+
+Before settlement, a pending deposit can be canceled:
+
+```solidity
+cancelDepositRequest(requestId)
+```
+
+For new deposit capacity, use:
+
+```solidity
+maxRequestDeposit(account)
+```
+
+In ERC-7540 style, `maxDeposit` and `maxMint` mean "already claimable after settlement", not "how much can I request now".
+
+## How Redeems Work
+
+A user with shares calls:
+
+```solidity
+requestRedeem(shares)
+```
+
+The shares move into the vault and wait for the next epoch price. After settlement, the user claims USDT with:
+
+```solidity
+redeem(shares, receiver, controller)
+withdraw(assets, receiver, controller)
+```
+
+There is also a shortcut for users who deposited, waited for settlement, but never claimed their shares:
+
+```solidity
+requestRedeemClaimableDeposit(depositRequestId, shares)
+```
+
+This lets them request a redeem from claimable shares without first moving those shares to their wallet.
+
+Before settlement, a pending redeem can be canceled:
+
+```solidity
+cancelRedeemRequest(requestId)
+```
+
+## Settlement
+
+Epochs have no fixed on-chain duration. The owner settles whenever off-chain NAV is ready.
+
+Empty epochs cannot be settled. There must be at least one pending deposit or redeem request.
+
+During settlement the contract:
+
+1. records the new share price;
+2. turns pending deposits into claimable shares;
+3. turns pending redeems into claimable USDT;
+4. burns shares that were locked for redeem;
+5. keeps enough USDT in the contract for claims;
+6. sends surplus USDT to `liquidityVault`;
+7. pulls missing USDT from `liquidityVault` if redemptions are larger than the contract balance.
+
+If the vault needs to pull USDT, `liquidityVault` must approve the HedgeFund contract before settlement.
+
+## Price
+
+The owner reports one price per settled epoch:
+
+```solidity
+settleEpoch(newSharePrice)
+```
+
+`newSharePrice` is scaled by `1e18`.
+
+The price is not fixed when a user makes a request. It is fixed when the owner settles that request's epoch.
+
+All requests in the same epoch use the same price.
+
+There is a simple on-chain sanity check around the reported price:
+
+- price must be at least `MIN_SHARE_PRICE`;
+- price cannot move by more than `MAX_PRICE_CHANGE_BPS` from the last settled price.
+
+These checks catch bad inputs such as `1` instead of `1e18` and keep each epoch price close to the previous settled price.
+
+## Standards
+
+The contract inherits OpenZeppelin `ERC4626` and implements the ERC-7540 deposit/redeem request interfaces from `forge-std`.
+
+The normal ERC-4626 preview functions revert because this is an async vault:
+
+```solidity
+previewDeposit
+previewMint
+previewWithdraw
+previewRedeem
+```
+
+`share()` returns the vault address itself, which is the ERC20 share token.
+
+## Asset Assumptions
+
+The asset should be a plain ERC20 like USDT:
+
+- no transfer fee;
+- no rebasing;
+- no unexpected balance changes.
+
+## Implementation Details
+
+The contract uses OpenZeppelin `ReentrancyGuard` on request, settlement, and claim paths.
+
+Rounding is intentionally conservative:
+
+- deposit claims round shares down;
+- mint claims consume assets rounded up;
+- redeem claims round assets down;
+- withdraw claims burn shares rounded up.
+
+Tiny rounding dust stays in the vault and can later be sent as surplus to `liquidityVault` during settlement.
 
 ## Development
 
