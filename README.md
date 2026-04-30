@@ -12,6 +12,8 @@ The contract is built around the ERC-7540 request flow, but it stays much smalle
 
 `liquidityVault` is the address that receives extra USDT after settlement and funds redemption deficits. It defaults to `owner`, but can be changed with `setLiquidityVault`.
 
+Surplus USDT is pull-based: settlement records it in `pendingLiquidityAssets`, and `liquidityVault` claims it with `claimLiquidityAssets()`. This keeps settlement from failing just because the surplus receiver cannot accept a transfer at that moment.
+
 Users control their own requests. They can also approve an ERC-7540 operator with `setOperator`.
 
 Operators can claim and redeem on behalf of a user, but they cannot initiate a deposit that pulls the user's USDT. Deposits must be started by the token owner.
@@ -97,10 +99,16 @@ During settlement the contract:
 3. turns pending redeems into claimable USDT;
 4. burns shares that were locked for redeem;
 5. keeps enough USDT in the contract for claims;
-6. sends surplus USDT to `liquidityVault`;
+6. records surplus USDT for `liquidityVault`;
 7. pulls missing USDT from `liquidityVault` if redemptions are larger than the contract balance.
 
 If the vault needs to pull USDT, `liquidityVault` must approve the HedgeFund contract before settlement.
+
+If settlement leaves surplus USDT, `liquidityVault` later calls:
+
+```solidity
+claimLiquidityAssets()
+```
 
 ## Price
 
@@ -158,6 +166,8 @@ Rounding is intentionally conservative:
 - withdraw claims burn shares rounded up.
 
 Tiny rounding dust stays in the vault and can later be sent as surplus to `liquidityVault` during settlement.
+
+The contract tracks each controller's active request epochs directly, so claims do not scan through unrelated epochs created by other users.
 
 ## Development
 

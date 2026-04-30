@@ -458,6 +458,48 @@ contract HedgeFundTest is Test {
         assertEq(usdt.balanceOf(user), 950 * USDT);
     }
 
+    function testSettlementSurplusIsPulledByLiquidityVault() public {
+        vm.prank(user);
+        fund.requestDeposit(100 * USDT);
+
+        vm.prank(owner);
+        fund.settleEpoch(1e18);
+
+        assertEq(fund.pendingLiquidityAssets(), 100 * USDT);
+        assertEq(usdt.balanceOf(owner), 1_000 * USDT);
+        assertEq(usdt.balanceOf(address(fund)), 100 * USDT);
+
+        vm.prank(owner);
+        uint256 assets = fund.claimLiquidityAssets();
+
+        assertEq(assets, 100 * USDT);
+        assertEq(fund.pendingLiquidityAssets(), 0);
+        assertEq(usdt.balanceOf(owner), 1_100 * USDT);
+    }
+
+    function testUnclaimedLiquiditySurplusCanFundLaterRedeems() public {
+        vm.prank(user);
+        uint256 depositRequestId = fund.requestDeposit(100 * USDT);
+
+        vm.prank(owner);
+        fund.settleEpoch(1e18);
+
+        vm.prank(user);
+        fund.claimDeposit(depositRequestId);
+
+        vm.prank(user);
+        fund.requestRedeem(50 * USDT);
+
+        vm.prank(owner);
+        usdt.approve(address(fund), 0);
+
+        vm.prank(owner);
+        fund.settleEpoch(1e18);
+
+        assertEq(fund.pendingLiquidityAssets(), 50 * USDT);
+        assertEq(fund.totalClaimableRedeemAssets(), 50 * USDT);
+    }
+
     function testDepositLimitIncludesPendingDeposits() public {
         vm.prank(owner);
         fund.setDepositLimit(150 * USDT);
@@ -471,6 +513,53 @@ contract HedgeFundTest is Test {
         vm.prank(user2);
         vm.expectRevert(HedgeFund.DepositLimitExceeded.selector);
         fund.requestDeposit(51 * USDT);
+    }
+
+    function testDepositLimitIncludesClaimableRedeemAssets() public {
+        vm.prank(owner);
+        fund.setDepositLimit(150 * USDT);
+
+        _depositSettleAndClaim(user, 100 * USDT, 1e18);
+
+        vm.prank(user);
+        fund.requestRedeem(50 * USDT);
+
+        _settle(1e18);
+
+        assertEq(fund.totalAssets(), 50 * USDT);
+        assertEq(fund.totalClaimableRedeemAssets(), 50 * USDT);
+        assertEq(fund.maxRequestDeposit(user2), 50 * USDT);
+    }
+
+    function testControllerActiveEpochListSkipsOtherSettledEpochs() public {
+        vm.prank(user);
+        uint256 firstRequestId = fund.requestDeposit(10 * USDT);
+
+        _settle(1e18);
+
+        for (uint256 i; i < 3; i++) {
+            vm.prank(user2);
+            fund.requestDeposit(1 * USDT);
+            _settle(1e18);
+        }
+
+        vm.prank(user);
+        uint256 secondRequestId = fund.requestDeposit(20 * USDT);
+
+        _settle(1e18);
+
+        assertEq(fund.maxDeposit(user), 30 * USDT);
+
+        vm.prank(user);
+        fund.claimDeposit(firstRequestId);
+
+        assertEq(fund.firstDepositRequest(user), secondRequestId);
+
+        vm.prank(user);
+        fund.claimDeposit(secondRequestId);
+
+        assertEq(fund.balanceOf(user), 30 * USDT);
+        assertEq(fund.firstDepositRequest(user), 0);
     }
 
     function testOperatorCanClaimButNotRequestDeposit() public {
@@ -519,5 +608,9 @@ contract HedgeFundTest is Test {
     function _settle(uint256 price) internal {
         vm.prank(owner);
         fund.settleEpoch(price);
+        if (fund.pendingLiquidityAssets() != 0) {
+            vm.prank(fund.liquidityVault());
+            fund.claimLiquidityAssets();
+        }
     }
 }

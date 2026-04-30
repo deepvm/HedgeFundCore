@@ -67,11 +67,19 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
     /// @notice Aggregate assets reserved in this vault and awaiting redeem claims.
     uint256 public totalClaimableRedeemAssets;
 
+    /// @notice Surplus assets claimable by `liquidityVault`.
+    uint256 public pendingLiquidityAssets;
+
     /// @notice Earliest epoch that may contain a deposit request for a controller.
     mapping(address controller => uint256 epoch) public firstDepositRequest;
 
     /// @notice Earliest epoch that may contain a redeem request for a controller.
     mapping(address controller => uint256 epoch) public firstRedeemRequest;
+
+    mapping(address controller => uint256 epoch) private _lastDepositRequest;
+    mapping(address controller => uint256 epoch) private _lastRedeemRequest;
+    mapping(address controller => mapping(uint256 epoch => uint256 nextEpoch)) private _nextDepositRequest;
+    mapping(address controller => mapping(uint256 epoch => uint256 nextEpoch)) private _nextRedeemRequest;
 
     /// @inheritdoc IERC7540Operator
     mapping(address controller => mapping(address operator => bool)) public override isOperator;
@@ -112,6 +120,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
     event SharePriceUpdated(uint256 sharePrice);
     event DepositLimitUpdated(uint256 depositLimit);
     event LiquidityVaultUpdated(address liquidityVault);
+    event LiquidityAssetsClaimed(address indexed liquidityVault, uint256 assets);
     event DepositRequestCanceled(address indexed controller, uint256 indexed requestId, uint256 assets);
     event RedeemRequestCanceled(address indexed controller, uint256 indexed requestId, uint256 shares);
 
@@ -147,6 +156,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
 
     /// @inheritdoc IERC7540Operator
     function setOperator(address operator, bool approved) external override returns (bool) {
+        if (operator == address(0)) revert ZeroAddress();
         isOperator[msg.sender][operator] = approved;
         emit OperatorSet(msg.sender, operator, approved);
         return true;
@@ -171,6 +181,16 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         emit LiquidityVaultUpdated(newLiquidityVault);
     }
 
+    /// @notice Claims surplus assets owed to the liquidity vault after settlements.
+    function claimLiquidityAssets() external nonReentrant returns (uint256 assets) {
+        if (msg.sender != liquidityVault) revert NotOperator();
+        assets = pendingLiquidityAssets;
+        if (assets == 0) revert ZeroAmount();
+        pendingLiquidityAssets = 0;
+        IERC20(asset()).safeTransfer(msg.sender, assets);
+        emit LiquidityAssetsClaimed(msg.sender, assets);
+    }
+
     /// @notice Requests an async deposit for the caller.
     /// @dev Transfers assets from the caller into this vault and assigns the request to the next epoch.
     /// @param assets Amount of asset tokens to request for deposit.
@@ -192,11 +212,11 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         if (controller == address(0) || owner_ == address(0)) revert ZeroAddress();
         if (msg.sender != owner_ || controller != owner_) revert NotRequestOwner();
         if (assets > maxRequestDeposit(controller)) revert DepositLimitExceeded();
-        requestId = _nextRequestId();
+        requestId = currentEpoch + 1;
 
         IERC20(asset()).safeTransferFrom(owner_, address(this), assets);
+        if (_depositAssets[requestId][controller] == 0) _pushDepositRequest(controller, requestId);
         _depositAssets[requestId][controller] += assets;
-        _setFirstDepositRequest(controller, requestId);
         epochDepositAssets[requestId] += assets;
         pendingDepositAssets += assets;
 
@@ -251,7 +271,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 shares)
     {
-        return _claimDeposit(requestId, _depositAssets[requestId][controller], receiver, controller);
+        (, shares) = _claimDeposit(requestId, _depositAssets[requestId][controller], false, receiver, controller);
     }
 
     /// @notice Requests an async redeem for caller-owned shares.
@@ -275,10 +295,10 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         if (controller == address(0) || owner_ == address(0)) revert ZeroAddress();
         if (controller != owner_) revert NotRequestOwner();
         if (msg.sender != owner_ && !isOperator[owner_][msg.sender]) _spendAllowance(owner_, msg.sender, shares);
-        requestId = _nextRequestId();
+        requestId = currentEpoch + 1;
 
         _transfer(owner_, address(this), shares);
-        _requestRedeem(requestId, controller, owner_, shares);
+        _requestRedeem(requestId, controller, shares);
     }
 
     /// @notice Cancels an unsettled redeem request and returns shares to the controller.
@@ -342,13 +362,14 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         uint256 maxShares = Math.mulDiv(assets, PRICE_SCALE, price);
         if (shares == 0 || shares > maxShares) revert ZeroAmount();
 
-        _depositAssets[depositRequestId][controller] =
-            assets - Math.mulDiv(shares, price, PRICE_SCALE, Math.Rounding.Ceil);
+        uint256 spentAssets = Math.mulDiv(shares, price, PRICE_SCALE, Math.Rounding.Ceil);
+        if (spentAssets > assets) revert ZeroAmount();
+        _depositAssets[depositRequestId][controller] = assets - spentAssets;
         totalClaimableDepositShares -= shares;
         _advanceFirstDepositRequest(controller);
 
-        requestId = _nextRequestId();
-        _requestRedeem(requestId, controller, controller, shares);
+        requestId = currentEpoch + 1;
+        _requestRedeem(requestId, controller, shares);
     }
 
     /// @notice Settles the next epoch at an owner-reported share price.
@@ -404,24 +425,27 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 assets)
     {
-        _checkOperator(controller);
-        if (receiver == address(0)) revert ZeroAddress();
-
-        return _claimRedeem(requestId, _redeemShares[requestId][controller], receiver, controller);
+        (assets,) = _claimRedeem(requestId, _redeemShares[requestId][controller], false, receiver, controller);
     }
 
     /// @inheritdoc IERC7540Deposit
     /// @dev Passing `requestId == 0` returns the aggregate pending deposit assets for the current next epoch.
     function pendingDepositRequest(uint256 requestId, address controller) public view override returns (uint256) {
-        if (requestId == 0) return _pendingDepositAssets(controller);
-        return epochPrice[requestId] == 0 ? _depositAssets[requestId][controller] : 0;
+        return requestId == 0
+            ? _depositAssets[currentEpoch + 1][controller]
+            : epochPrice[requestId] == 0 ? _depositAssets[requestId][controller] : 0;
     }
 
     /// @inheritdoc IERC7540Deposit
     /// @dev Passing `requestId == 0` returns aggregate claimable deposit assets across settled epochs.
-    function claimableDepositRequest(uint256 requestId, address controller) public view override returns (uint256) {
-        if (requestId == 0) return _claimableDepositAssets(controller);
-        return epochPrice[requestId] == 0 ? 0 : _depositAssets[requestId][controller];
+    function claimableDepositRequest(uint256 requestId, address controller)
+        public
+        view
+        override
+        returns (uint256 assets)
+    {
+        if (requestId == 0) (assets,) = _claimableDeposit(controller);
+        else assets = epochPrice[requestId] == 0 ? 0 : _depositAssets[requestId][controller];
     }
 
     /// @notice Returns claimable shares for a settled deposit request.
@@ -437,15 +461,21 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
     /// @inheritdoc IERC7540Redeem
     /// @dev Passing `requestId == 0` returns aggregate pending redeem shares for the current next epoch.
     function pendingRedeemRequest(uint256 requestId, address controller) public view override returns (uint256) {
-        if (requestId == 0) return _pendingRedeemShares(controller);
-        return epochPrice[requestId] == 0 ? _redeemShares[requestId][controller] : 0;
+        return requestId == 0
+            ? _redeemShares[currentEpoch + 1][controller]
+            : epochPrice[requestId] == 0 ? _redeemShares[requestId][controller] : 0;
     }
 
     /// @inheritdoc IERC7540Redeem
     /// @dev Passing `requestId == 0` returns aggregate claimable redeem shares across settled epochs.
-    function claimableRedeemRequest(uint256 requestId, address controller) public view override returns (uint256) {
-        if (requestId == 0) return _claimableRedeemShares(controller);
-        return epochPrice[requestId] == 0 ? 0 : _redeemShares[requestId][controller];
+    function claimableRedeemRequest(uint256 requestId, address controller)
+        public
+        view
+        override
+        returns (uint256 shares)
+    {
+        if (requestId == 0) (, shares) = _claimableRedeem(controller);
+        else shares = epochPrice[requestId] == 0 ? 0 : _redeemShares[requestId][controller];
     }
 
     /// @inheritdoc ERC4626
@@ -456,22 +486,22 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
 
     /// @inheritdoc ERC4626
     /// @dev ERC7540 semantics: returns claimable deposit assets, not remaining request capacity.
-    function maxDeposit(address controller) public view override returns (uint256) {
-        return _claimableDepositAssets(controller);
+    function maxDeposit(address controller) public view override returns (uint256 assets) {
+        (assets,) = _claimableDeposit(controller);
     }
 
     /// @notice Returns remaining capacity for new async deposit requests.
     /// @dev This is separate from ERC7540 `maxDeposit`, which reports already claimable deposit assets.
     /// @return maxAssets Remaining deposit request capacity in asset units.
     function maxRequestDeposit(address) public view returns (uint256 maxAssets) {
-        uint256 managedAssets = totalAssets() + pendingDepositAssets;
+        uint256 managedAssets = totalAssets() + pendingDepositAssets + totalClaimableRedeemAssets;
         return managedAssets < depositLimit ? depositLimit - managedAssets : 0;
     }
 
     /// @inheritdoc ERC4626
     /// @dev ERC7540 semantics: returns claimable shares available through `mint`.
-    function maxMint(address receiver) public view override returns (uint256) {
-        return _claimableDepositShares(receiver);
+    function maxMint(address receiver) public view override returns (uint256 shares) {
+        (, shares) = _claimableDeposit(receiver);
     }
 
     /// @inheritdoc ERC4626
@@ -489,29 +519,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 shares)
     {
-        _checkOperator(controller);
-        if (assets == 0) revert ZeroAmount();
-
-        uint256 remaining = assets;
-        uint256 epoch = firstDepositRequest[controller];
-        while (remaining != 0 && epoch <= currentEpoch) {
-            uint256 claimable = _depositAssets[epoch][controller];
-            if (claimable != 0 && epochPrice[epoch] != 0) {
-                uint256 claimed = remaining < claimable ? remaining : claimable;
-                _depositAssets[epoch][controller] = claimable - claimed;
-                shares += Math.mulDiv(claimed, PRICE_SCALE, epochPrice[epoch]);
-                remaining -= claimed;
-            }
-            epoch++;
-        }
-
-        if (remaining != 0 || shares == 0) revert ZeroAmount();
-        if (receiver == address(0)) revert ZeroAddress();
-        totalClaimableDepositShares -= shares;
-        _advanceFirstDepositRequest(controller);
-        _transfer(address(this), receiver, shares);
-
-        emit Deposit(controller, receiver, assets, shares);
+        (, shares) = _claimDeposit(0, assets, false, receiver, controller);
     }
 
     /// @inheritdoc ERC4626
@@ -529,37 +537,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 assets)
     {
-        _checkOperator(controller);
-        if (shares == 0) revert ZeroAmount();
-
-        uint256 remaining = shares;
-        uint256 epoch = firstDepositRequest[controller];
-        while (remaining != 0 && epoch <= currentEpoch) {
-            uint256 price = epochPrice[epoch];
-            uint256 claimableAssets = _depositAssets[epoch][controller];
-            uint256 claimableShares = price == 0 ? 0 : Math.mulDiv(claimableAssets, PRICE_SCALE, price);
-            if (claimableShares != 0) {
-                if (remaining < claimableShares) {
-                    uint256 claimedAssets = Math.mulDiv(remaining, price, PRICE_SCALE, Math.Rounding.Ceil);
-                    _depositAssets[epoch][controller] = claimableAssets - claimedAssets;
-                    assets += claimedAssets;
-                    remaining = 0;
-                    break;
-                }
-                _depositAssets[epoch][controller] = 0;
-                assets += claimableAssets;
-                remaining -= claimableShares;
-            }
-            epoch++;
-        }
-
-        if (remaining != 0 || assets == 0) revert ZeroAmount();
-        if (receiver == address(0)) revert ZeroAddress();
-        totalClaimableDepositShares -= shares;
-        _advanceFirstDepositRequest(controller);
-        _transfer(address(this), receiver, shares);
-
-        emit Deposit(controller, receiver, assets, shares);
+        (assets,) = _claimDeposit(0, shares, true, receiver, controller);
     }
 
     /// @inheritdoc ERC4626
@@ -571,40 +549,7 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 shares)
     {
-        _checkOperator(controller);
-        if (assets == 0) revert ZeroAmount();
-
-        uint256 remaining = assets;
-        uint256 accountedAssets;
-        uint256 epoch = firstRedeemRequest[controller];
-        while (remaining != 0 && epoch <= currentEpoch) {
-            uint256 price = epochPrice[epoch];
-            uint256 claimableShares = _redeemShares[epoch][controller];
-            uint256 claimableAssets = price == 0 ? 0 : Math.mulDiv(claimableShares, price, PRICE_SCALE);
-            if (claimableAssets != 0) {
-                if (remaining < claimableAssets) {
-                    uint256 claimedShares = Math.mulDiv(remaining, PRICE_SCALE, price, Math.Rounding.Ceil);
-                    _redeemShares[epoch][controller] = claimableShares - claimedShares;
-                    shares += claimedShares;
-                    accountedAssets += Math.mulDiv(claimedShares, price, PRICE_SCALE);
-                    remaining = 0;
-                    break;
-                }
-                _redeemShares[epoch][controller] = 0;
-                shares += claimableShares;
-                accountedAssets += claimableAssets;
-                remaining -= claimableAssets;
-            }
-            epoch++;
-        }
-
-        if (remaining != 0 || shares == 0) revert ZeroAmount();
-        if (receiver == address(0)) revert ZeroAddress();
-        totalClaimableRedeemAssets -= accountedAssets;
-        _advanceFirstRedeemRequest(controller);
-        IERC20(asset()).safeTransfer(receiver, assets);
-
-        emit Withdraw(msg.sender, receiver, controller, assets, shares);
+        (, shares) = _claimRedeem(0, assets, true, receiver, controller);
     }
 
     /// @inheritdoc ERC4626
@@ -615,47 +560,46 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         nonReentrant
         returns (uint256 assets)
     {
-        _checkOperator(controller);
-        return _claimRedeem(0, shares, receiver, controller);
+        (assets,) = _claimRedeem(0, shares, false, receiver, controller);
     }
 
     /// @inheritdoc ERC4626
     /// @dev ERC7540 semantics: returns claimable redeem assets.
-    function maxWithdraw(address controller) public view override returns (uint256) {
-        return _claimableRedeemAssets(controller);
+    function maxWithdraw(address controller) public view override returns (uint256 assets) {
+        (assets,) = _claimableRedeem(controller);
     }
 
     /// @inheritdoc ERC4626
     /// @dev ERC7540 semantics: returns claimable redeem shares.
-    function maxRedeem(address controller) public view override returns (uint256) {
-        return _claimableRedeemShares(controller);
+    function maxRedeem(address controller) public view override returns (uint256 shares) {
+        (, shares) = _claimableRedeem(controller);
     }
 
     /// @inheritdoc ERC4626
     /// @dev Required by ERC7540 async deposit semantics.
     function previewDeposit(uint256) public view override returns (uint256) {
-        _revertAsyncDeposit();
+        _revertAsync(true);
         return 0;
     }
 
     /// @inheritdoc ERC4626
     /// @dev Required by ERC7540 async deposit semantics.
     function previewMint(uint256) public view override returns (uint256) {
-        _revertAsyncDeposit();
+        _revertAsync(true);
         return 0;
     }
 
     /// @inheritdoc ERC4626
     /// @dev Required by ERC7540 async redeem semantics.
     function previewWithdraw(uint256) public view override returns (uint256) {
-        _revertAsyncRedeem();
+        _revertAsync(false);
         return 0;
     }
 
     /// @inheritdoc ERC4626
     /// @dev Required by ERC7540 async redeem semantics.
     function previewRedeem(uint256) public view override returns (uint256) {
-        _revertAsyncRedeem();
+        _revertAsync(false);
         return 0;
     }
 
@@ -667,49 +611,29 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         return Math.mulDiv(shares, sharePrice, PRICE_SCALE, rounding);
     }
 
-    function _nextRequestId() private view returns (uint256) {
-        return currentEpoch + 1;
-    }
-
-    function _pendingDepositAssets(address controller) private view returns (uint256) {
-        return _depositAssets[currentEpoch + 1][controller];
-    }
-
-    function _claimableDepositAssets(address controller) private view returns (uint256 assets) {
+    function _claimableDeposit(address controller) private view returns (uint256 assets, uint256 shares) {
         uint256 epoch = firstDepositRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch) {
-            if (epochPrice[epoch] != 0) assets += _depositAssets[epoch][controller];
-            epoch++;
-        }
-    }
-
-    function _claimableDepositShares(address controller) private view returns (uint256 shares) {
-        uint256 epoch = firstDepositRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch) {
+        while (epoch != 0) {
             uint256 price = epochPrice[epoch];
-            if (price != 0) shares += Math.mulDiv(_depositAssets[epoch][controller], PRICE_SCALE, price);
-            epoch++;
+            if (price != 0) {
+                uint256 claimableAssets = _depositAssets[epoch][controller];
+                assets += claimableAssets;
+                shares += Math.mulDiv(claimableAssets, PRICE_SCALE, price);
+            }
+            epoch = _nextDepositRequest[controller][epoch];
         }
     }
 
-    function _pendingRedeemShares(address controller) private view returns (uint256) {
-        return _redeemShares[currentEpoch + 1][controller];
-    }
-
-    function _claimableRedeemShares(address controller) private view returns (uint256 shares) {
+    function _claimableRedeem(address controller) private view returns (uint256 assets, uint256 shares) {
         uint256 epoch = firstRedeemRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch) {
-            if (epochPrice[epoch] != 0) shares += _redeemShares[epoch][controller];
-            epoch++;
-        }
-    }
-
-    function _claimableRedeemAssets(address controller) private view returns (uint256 assets) {
-        uint256 epoch = firstRedeemRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch) {
+        while (epoch != 0) {
             uint256 price = epochPrice[epoch];
-            if (price != 0) assets += Math.mulDiv(_redeemShares[epoch][controller], price, PRICE_SCALE);
-            epoch++;
+            if (price != 0) {
+                uint256 claimableShares = _redeemShares[epoch][controller];
+                shares += claimableShares;
+                assets += Math.mulDiv(claimableShares, price, PRICE_SCALE);
+            }
+            epoch = _nextRedeemRequest[controller][epoch];
         }
     }
 
@@ -729,25 +653,56 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
             || interfaceId == type(IERC165).interfaceId;
     }
 
-    function _requestRedeem(uint256 requestId, address controller, address owner_, uint256 shares) private {
+    function _requestRedeem(uint256 requestId, address controller, uint256 shares) private {
+        if (_redeemShares[requestId][controller] == 0) _pushRedeemRequest(controller, requestId);
         _redeemShares[requestId][controller] += shares;
-        _setFirstRedeemRequest(controller, requestId);
         epochRedeemShares[requestId] += shares;
         totalPendingRedeemShares += shares;
-        emit RedeemRequest(controller, owner_, requestId, msg.sender, shares);
+        emit RedeemRequest(controller, controller, requestId, msg.sender, shares);
     }
 
-    function _claimDeposit(uint256 requestId, uint256 assets, address receiver, address controller)
+    function _claimDeposit(uint256 requestId, uint256 amount, bool exactShares, address receiver, address controller)
         private
-        returns (uint256 shares)
+        returns (uint256 assets, uint256 shares)
     {
         _checkOperator(controller);
-        if (assets == 0 || epochPrice[requestId] == 0) revert ZeroAmount();
+        if (amount == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
 
-        _depositAssets[requestId][controller] -= assets;
-        shares = Math.mulDiv(assets, PRICE_SCALE, epochPrice[requestId]);
-        if (shares == 0) revert ZeroAmount();
+        uint256 remaining = amount;
+        uint256 epoch = requestId == 0 ? firstDepositRequest[controller] : requestId;
+        uint256 lastEpoch = requestId == 0 ? currentEpoch : requestId;
+        while (remaining != 0 && epoch != 0 && epoch <= lastEpoch) {
+            uint256 price = epochPrice[epoch];
+            uint256 claimableAssets = _depositAssets[epoch][controller];
+            if (claimableAssets != 0 && price != 0) {
+                if (exactShares) {
+                    uint256 claimableShares = Math.mulDiv(claimableAssets, PRICE_SCALE, price);
+                    if (claimableShares != 0) {
+                        if (remaining < claimableShares) {
+                            uint256 claimedAssets = Math.mulDiv(remaining, price, PRICE_SCALE, Math.Rounding.Ceil);
+                            _depositAssets[epoch][controller] = claimableAssets - claimedAssets;
+                            assets += claimedAssets;
+                            shares += remaining;
+                            remaining = 0;
+                            break;
+                        }
+                        _depositAssets[epoch][controller] = 0;
+                        shares += claimableShares;
+                        remaining -= claimableShares;
+                    }
+                } else {
+                    uint256 claimedAssets = remaining < claimableAssets ? remaining : claimableAssets;
+                    _depositAssets[epoch][controller] = claimableAssets - claimedAssets;
+                    assets += claimedAssets;
+                    shares += Math.mulDiv(claimedAssets, PRICE_SCALE, price);
+                    remaining -= claimedAssets;
+                }
+            }
+            epoch = requestId == 0 ? _nextDepositRequest[controller][epoch] : 0;
+        }
+
+        if (remaining != 0 || assets == 0 || shares == 0) revert ZeroAmount();
         totalClaimableDepositShares -= shares;
         _advanceFirstDepositRequest(controller);
         _transfer(address(this), receiver, shares);
@@ -755,65 +710,94 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         emit Deposit(controller, receiver, assets, shares);
     }
 
-    function _claimRedeem(uint256 requestId, uint256 shares, address receiver, address controller)
+    function _claimRedeem(uint256 requestId, uint256 amount, bool exactAssets, address receiver, address controller)
         private
-        returns (uint256 assets)
+        returns (uint256 assets, uint256 shares)
     {
         _checkOperator(controller);
-        if (shares == 0) revert ZeroAmount();
+        if (amount == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
 
-        uint256 remaining = shares;
+        uint256 remaining = amount;
+        uint256 accountedAssets;
         uint256 epoch = requestId == 0 ? firstRedeemRequest[controller] : requestId;
         uint256 lastEpoch = requestId == 0 ? currentEpoch : requestId;
         while (remaining != 0 && epoch != 0 && epoch <= lastEpoch) {
             uint256 price = epochPrice[epoch];
             uint256 claimable = _redeemShares[epoch][controller];
             if (claimable != 0 && price != 0) {
-                uint256 claimed = remaining < claimable ? remaining : claimable;
-                _redeemShares[epoch][controller] = claimable - claimed;
-                assets += Math.mulDiv(claimed, price, PRICE_SCALE);
-                remaining -= claimed;
+                if (exactAssets) {
+                    uint256 claimableAssets = Math.mulDiv(claimable, price, PRICE_SCALE);
+                    if (claimableAssets != 0) {
+                        if (remaining < claimableAssets) {
+                            uint256 claimedShares = Math.mulDiv(remaining, PRICE_SCALE, price, Math.Rounding.Ceil);
+                            _redeemShares[epoch][controller] = claimable - claimedShares;
+                            shares += claimedShares;
+                            assets += remaining;
+                            accountedAssets += Math.mulDiv(claimedShares, price, PRICE_SCALE);
+                            remaining = 0;
+                            break;
+                        }
+                        _redeemShares[epoch][controller] = 0;
+                        shares += claimable;
+                        assets += claimableAssets;
+                        accountedAssets += claimableAssets;
+                        remaining -= claimableAssets;
+                    }
+                } else {
+                    uint256 claimed = remaining < claimable ? remaining : claimable;
+                    _redeemShares[epoch][controller] = claimable - claimed;
+                    shares += claimed;
+                    assets += Math.mulDiv(claimed, price, PRICE_SCALE);
+                    accountedAssets += Math.mulDiv(claimed, price, PRICE_SCALE);
+                    remaining -= claimed;
+                }
             }
-            epoch++;
+            epoch = requestId == 0 ? _nextRedeemRequest[controller][epoch] : 0;
         }
 
-        if (remaining != 0 || assets == 0) revert ZeroAmount();
-        totalClaimableRedeemAssets -= assets;
+        if (remaining != 0 || assets == 0 || shares == 0) revert ZeroAmount();
+        totalClaimableRedeemAssets -= accountedAssets;
         _advanceFirstRedeemRequest(controller);
         IERC20(asset()).safeTransfer(receiver, assets);
 
         emit Withdraw(msg.sender, receiver, controller, assets, shares);
     }
 
-    function _setFirstDepositRequest(address controller, uint256 requestId) private {
-        uint256 first = firstDepositRequest[controller];
-        if (first == 0 || requestId < first) firstDepositRequest[controller] = requestId;
+    function _pushDepositRequest(address controller, uint256 requestId) private {
+        uint256 last = _lastDepositRequest[controller];
+        if (firstDepositRequest[controller] == 0) firstDepositRequest[controller] = requestId;
+        else if (last != requestId) _nextDepositRequest[controller][last] = requestId;
+        _lastDepositRequest[controller] = requestId;
     }
 
-    function _setFirstRedeemRequest(address controller, uint256 requestId) private {
-        uint256 first = firstRedeemRequest[controller];
-        if (first == 0 || requestId < first) firstRedeemRequest[controller] = requestId;
+    function _pushRedeemRequest(address controller, uint256 requestId) private {
+        uint256 last = _lastRedeemRequest[controller];
+        if (firstRedeemRequest[controller] == 0) firstRedeemRequest[controller] = requestId;
+        else if (last != requestId) _nextRedeemRequest[controller][last] = requestId;
+        _lastRedeemRequest[controller] = requestId;
     }
 
     function _advanceFirstDepositRequest(address controller) private {
         uint256 epoch = firstDepositRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch && _depositAssets[epoch][controller] == 0) epoch++;
-        firstDepositRequest[controller] = epoch != 0 && _depositAssets[epoch][controller] != 0 ? epoch : 0;
+        while (epoch != 0 && _depositAssets[epoch][controller] == 0) epoch = _nextDepositRequest[controller][epoch];
+        firstDepositRequest[controller] = epoch;
+        if (epoch == 0) _lastDepositRequest[controller] = 0;
     }
 
     function _advanceFirstRedeemRequest(address controller) private {
         uint256 epoch = firstRedeemRequest[controller];
-        while (epoch != 0 && epoch <= currentEpoch && _redeemShares[epoch][controller] == 0) epoch++;
-        firstRedeemRequest[controller] = epoch != 0 && _redeemShares[epoch][controller] != 0 ? epoch : 0;
+        while (epoch != 0 && _redeemShares[epoch][controller] == 0) epoch = _nextRedeemRequest[controller][epoch];
+        firstRedeemRequest[controller] = epoch;
+        if (epoch == 0) _lastRedeemRequest[controller] = 0;
     }
 
     function _checkSharePrice(uint256 newSharePrice) private view {
         if (newSharePrice < MIN_SHARE_PRICE) revert InvalidSharePrice();
-
-        uint256 minPrice = Math.mulDiv(sharePrice, BPS - MAX_PRICE_CHANGE_BPS, BPS);
-        uint256 maxPrice = Math.mulDiv(sharePrice, BPS + MAX_PRICE_CHANGE_BPS, BPS);
-        if (newSharePrice < minPrice || newSharePrice > maxPrice) revert PriceDeviationTooLarge();
+        if (
+            newSharePrice < Math.mulDiv(sharePrice, BPS - MAX_PRICE_CHANGE_BPS, BPS)
+                || newSharePrice > Math.mulDiv(sharePrice, BPS + MAX_PRICE_CHANGE_BPS, BPS)
+        ) revert PriceDeviationTooLarge();
     }
 
     function _settleAssets(uint256 redeemAssets) private {
@@ -823,9 +807,10 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         address vault = liquidityVault;
 
         if (available < redeemAssets) {
+            pendingLiquidityAssets = 0;
             token.safeTransferFrom(vault, address(this), redeemAssets - available);
-        } else if (available > redeemAssets) {
-            token.safeTransfer(vault, available - redeemAssets);
+        } else {
+            pendingLiquidityAssets = available - redeemAssets;
         }
 
         totalClaimableRedeemAssets += redeemAssets;
@@ -835,12 +820,10 @@ contract HedgeFund is ERC4626, Ownable, ReentrancyGuard, IERC7540Deposit, IERC75
         if (msg.sender != controller && !isOperator[controller][msg.sender]) revert NotOperator();
     }
 
-    // Keeps async preview reverts without triggering unreachable-code warnings in ERC4626.
-    function _revertAsyncDeposit() private view {
-        if (address(this) != address(0)) revert AsyncDeposit();
-    }
-
-    function _revertAsyncRedeem() private view {
-        if (address(this) != address(0)) revert AsyncRedeem();
+    function _revertAsync(bool deposit_) private view {
+        if (address(this) != address(0)) {
+            if (deposit_) revert AsyncDeposit();
+            revert AsyncRedeem();
+        }
     }
 }
