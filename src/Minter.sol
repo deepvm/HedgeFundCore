@@ -15,7 +15,7 @@ contract Minter is AccessControl {
     AUSD public immutable aUSD;
 
     constructor(address admin, IERC20 usdt_, AUSD ausd_) {
-        require(address(usdt_) != address(0) && address(ausd_) != address(0));
+        require(admin != address(0) && address(usdt_) != address(0) && address(ausd_) != address(0));
         USDT = usdt_;
         aUSD = ausd_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);

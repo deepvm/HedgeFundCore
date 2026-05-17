@@ -8,7 +8,10 @@ contract AUSD is ERC20, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     mapping(address account => bool blocked) public blacklisted;
 
+    event BlacklistUpdated(address indexed account, bool status);
+
     constructor(address admin) ERC20("Altitude USD", "aUSD") {
+        require(admin != address(0));
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
@@ -17,7 +20,9 @@ contract AUSD is ERC20, AccessControl {
     }
 
     function blacklist(address account, bool status) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(account != address(0));
         blacklisted[account] = status;
+        emit BlacklistUpdated(account, status);
     }
 
     function mint(address to, uint256 assets) external onlyRole(MINTER_ROLE) {

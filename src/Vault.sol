@@ -14,7 +14,7 @@ contract Vault is ERC4626, AccessControl {
     uint256 public lastUpdate;
 
     constructor(AUSD asset_, Minter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
-        require(address(minter_) != address(0));
+        require(admin != address(0) && address(minter_) != address(0));
         minter = minter_;
         lastUpdate = block.timestamp;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
