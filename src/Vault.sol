@@ -3,43 +3,47 @@ pragma solidity 0.8.34;
 
 import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "openzeppelin-contracts/contracts/token/ERC20/extensions/ERC4626.sol";
-import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
-import {AUSD} from "src/aUSD.sol";
+import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
+import {AUSD} from "./aUSD.sol";
+import {Minter} from "./Minter.sol";
 
-contract Vault is ERC4626, Ownable {
+contract Vault is ERC4626, AccessControl {
     uint256 private constant BPS = 10_000;
-    uint256 public apr;
+    Minter public immutable minter;
+    uint256 public apy;
     uint256 public lastUpdate;
 
-    constructor(AUSD asset_, address owner_) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) Ownable(owner_) {}
+    constructor(AUSD asset_, Minter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
+        require(address(minter_) != address(0));
+        minter = minter_;
+        lastUpdate = block.timestamp;
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+    }
 
-    function setAPR(uint256 apr_) external onlyOwner {
-        require(apr_ < BPS);
+    function setAPY(uint256 apy_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(apy_ <= BPS);
         _sync();
-        apr = apr_;
+        apy = apy_;
     }
 
     function totalAssets() public view override returns (uint256 assets) {
         assets = super.totalAssets();
-        assets += assets * apr * (block.timestamp - lastUpdate) / BPS / 365 days;
+        assets += assets * apy * (block.timestamp - lastUpdate) / BPS / 365 days;
     }
 
-    function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
+    function _transferIn(address from, uint256 assets) internal override {
         _sync();
-        super._deposit(caller, receiver, assets, shares);
+        super._transferIn(from, assets);
     }
 
-    function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares)
-        internal
-        override
-    {
+    function _transferOut(address to, uint256 assets) internal override {
         _sync();
-        super._withdraw(caller, receiver, owner, assets, shares);
+        super._transferOut(to, assets);
     }
 
     function _sync() private {
-        uint256 yield = super.totalAssets() * apr * (block.timestamp - lastUpdate) / BPS / 365 days;
+        uint256 yield = super.totalAssets() * apy * (block.timestamp - lastUpdate) / BPS / 365 days;
         lastUpdate = block.timestamp;
-        if (yield != 0) AUSD(asset()).mintYield(yield);
+        if (yield != 0) minter.mintYield(yield);
     }
 }

@@ -1,48 +1,35 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.34;
 
-import {IERC20, ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
-import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
+import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
 
-contract AUSD is ERC20, Ownable {
-    using SafeERC20 for IERC20;
+contract AUSD is ERC20, AccessControl {
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    mapping(address account => bool blocked) public blacklisted;
 
-    IERC20 public immutable USDT;
-    address public holder;
-    address public minter;
-
-    constructor(address owner_, IERC20 usdt_) ERC20("Altitude USD", "aUSD") Ownable(owner_) {
-        require(address(usdt_) != address(0));
-        USDT = usdt_;
+    constructor(address admin) ERC20("Altitude USD", "aUSD") {
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
     function decimals() public pure override returns (uint8) {
         return 6;
     }
 
-    function mint(uint256 assets) external {
-        USDT.safeTransferFrom(msg.sender, holder, assets);
-        _mint(msg.sender, assets);
+    function blacklist(address account, bool status) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        blacklisted[account] = status;
     }
 
-    function burn(uint256 assets) external {
-        _burn(msg.sender, assets);
-        USDT.safeTransfer(msg.sender, assets);
+    function mint(address to, uint256 assets) external onlyRole(MINTER_ROLE) {
+        _mint(to, assets);
     }
 
-    function mintYield(uint256 assets) external {
-        require(msg.sender == minter);
-        _mint(msg.sender, assets);
+    function burn(address from, uint256 assets) external onlyRole(MINTER_ROLE) {
+        _burn(from, assets);
     }
 
-    function settings(address minter_, address holder_) external onlyOwner {
-        require(minter_ != address(0) && holder_ != address(0));
-        minter = minter_;
-        holder = holder_;
-    }
-
-    function skim(address token, uint256 amount) external onlyOwner {
-        IERC20(token).safeTransfer(owner(), amount);
+    function _update(address from, address to, uint256 value) internal override {
+        require(!blacklisted[from] && !blacklisted[to]);
+        super._update(from, to, value);
     }
 }
