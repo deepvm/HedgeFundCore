@@ -4,35 +4,67 @@ pragma solidity 0.8.34;
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
+import {Nonces} from "openzeppelin-contracts/contracts/utils/Nonces.sol";
+import {EIP712} from "openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+import {SignatureChecker} from "openzeppelin-contracts/contracts/utils/cryptography/SignatureChecker.sol";
 import {AUSD} from "./aUSD.sol";
 
-contract Minter is AccessControl {
+contract Minter is AccessControl, EIP712, Nonces {
     using SafeERC20 for IERC20;
 
     bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
     bytes32 public constant DEPOSIT_ROLE = keccak256("DEPOSIT_ROLE");
+    bytes32 public constant SIGNER_ROLE = keccak256("SIGNER_ROLE");
+
+    bytes32 public constant MINT_TYPEHASH =
+        keccak256("Mint(address account,address deposit,uint256 assets,uint256 nonce,uint256 deadline)");
+    bytes32 public constant BURN_TYPEHASH =
+        keccak256("Burn(address account,uint256 assets,uint256 nonce,uint256 deadline)");
+
     IERC20 public immutable USDT;
     AUSD public immutable aUSD;
 
-    constructor(address admin, IERC20 usdt_, AUSD ausd_) {
+    constructor(address admin, IERC20 usdt_, AUSD ausd_) EIP712("aUSD Minter", "1") {
         require(admin != address(0) && address(usdt_) != address(0) && address(ausd_) != address(0));
         USDT = usdt_;
         aUSD = ausd_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
-    function mint(uint256 assets, address deposit) external {
+    function mint(uint256 assets, address deposit, address signer, uint256 deadline, bytes calldata signature)
+        external
+    {
         _checkRole(DEPOSIT_ROLE, deposit);
+        _checkPermit(
+            signer,
+            _hashTypedDataV4(
+                keccak256(abi.encode(MINT_TYPEHASH, msg.sender, deposit, assets, _useNonce(msg.sender), deadline))
+            ),
+            deadline,
+            signature
+        );
         USDT.safeTransferFrom(msg.sender, deposit, assets);
         aUSD.mint(msg.sender, assets);
     }
 
-    function burn(uint256 assets) external {
+    function burn(uint256 assets, address signer, uint256 deadline, bytes calldata signature) external {
+        _checkPermit(
+            signer,
+            _hashTypedDataV4(keccak256(abi.encode(BURN_TYPEHASH, msg.sender, assets, _useNonce(msg.sender), deadline))),
+            deadline,
+            signature
+        );
         aUSD.burn(msg.sender, assets);
         USDT.safeTransfer(msg.sender, assets);
     }
 
     function mintYield(uint256 assets) external onlyRole(VAULT_ROLE) {
         aUSD.mint(msg.sender, assets);
+    }
+
+    function _checkPermit(address signer, bytes32 digest, uint256 deadline, bytes calldata signature) private view {
+        require(block.timestamp <= deadline);
+        _checkRole(SIGNER_ROLE, signer);
+        require(SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature));
     }
 }

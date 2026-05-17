@@ -20,16 +20,22 @@ contract MockUSDT is ERC20 {
 }
 
 contract VaultTest is Test {
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
     MockUSDT internal usdt;
     AUSD internal ausd;
     Minter internal minter;
     Vault internal vault;
 
+    uint256 internal signerKey = 0xA11CE;
     address internal owner = makeAddr("owner");
     address internal user = makeAddr("user");
+    address internal signer;
     address internal exchange = makeAddr("exchange");
 
     function setUp() public {
+        signer = vm.addr(signerKey);
         usdt = new MockUSDT();
         ausd = new AUSD(owner);
         minter = new Minter(owner, usdt, ausd);
@@ -47,14 +53,21 @@ contract VaultTest is Test {
         vm.prank(owner);
         minter.grantRole(depositRole, exchange);
 
+        bytes32 signerRole = minter.SIGNER_ROLE();
+        vm.prank(owner);
+        minter.grantRole(signerRole, signer);
+
         vm.prank(owner);
         usdt.mint(user, 100e6);
     }
 
     function testMintAUSDSendsUSDTToExchange() public {
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 100e6, exchange, deadline);
+
         vm.startPrank(user);
         usdt.approve(address(minter), 100e6);
-        minter.mint(100e6, exchange);
+        minter.mint(100e6, exchange, signer, deadline, signature);
         vm.stopPrank();
 
         assertEq(usdt.balanceOf(exchange), 100e6);
@@ -62,9 +75,12 @@ contract VaultTest is Test {
     }
 
     function testStakeAccruesAPYAndBurnsToUSDT() public {
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 100e6, exchange, deadline);
+
         vm.startPrank(user);
         usdt.approve(address(minter), 100e6);
-        minter.mint(100e6, exchange);
+        minter.mint(100e6, exchange, signer, deadline, signature);
         ausd.approve(address(vault), 100e6);
         vault.deposit(100e6, user);
         vm.stopPrank();
@@ -82,8 +98,10 @@ contract VaultTest is Test {
 
         usdt.mint(address(minter), assets);
 
+        deadline = block.timestamp + 1 days;
+        signature = _burnSignature(user, assets, deadline);
         vm.prank(user);
-        minter.burn(assets);
+        minter.burn(assets, signer, deadline, signature);
 
         assertEq(ausd.balanceOf(user), 0);
         assertEq(usdt.balanceOf(user), assets);
@@ -108,10 +126,68 @@ contract VaultTest is Test {
         vm.prank(owner);
         ausd.blacklist(user, true);
 
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
+
         vm.startPrank(user);
         usdt.approve(address(minter), 1);
         vm.expectRevert();
-        minter.mint(1, exchange);
+        minter.mint(1, exchange, signer, deadline, signature);
         vm.stopPrank();
+    }
+
+    function testPermitCannotReplay() public {
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
+
+        vm.startPrank(user);
+        usdt.approve(address(minter), 2);
+        minter.mint(1, exchange, signer, deadline, signature);
+        vm.expectRevert();
+        minter.mint(1, exchange, signer, deadline, signature);
+        vm.stopPrank();
+    }
+
+    function testExpiredPermitReverts() public {
+        uint256 deadline = block.timestamp - 1;
+        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
+
+        vm.startPrank(user);
+        usdt.approve(address(minter), 1);
+        vm.expectRevert();
+        minter.mint(1, exchange, signer, deadline, signature);
+        vm.stopPrank();
+    }
+
+    function _mintSignature(address account, uint256 assets, address deposit, uint256 deadline)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _sign(
+            keccak256(abi.encode(minter.MINT_TYPEHASH(), account, deposit, assets, minter.nonces(account), deadline))
+        );
+    }
+
+    function _burnSignature(address account, uint256 assets, uint256 deadline) internal view returns (bytes memory) {
+        return _sign(keccak256(abi.encode(minter.BURN_TYPEHASH(), account, assets, minter.nonces(account), deadline)));
+    }
+
+    function _sign(bytes32 structHash) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(signerKey, keccak256(abi.encodePacked("\x19\x01", _domain(), structHash)));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _domain() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes("aUSD Minter")),
+                keccak256(bytes("1")),
+                block.chainid,
+                address(minter)
+            )
+        );
     }
 }
