@@ -2,7 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
-import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AUSD} from "../src/aUSD.sol";
 import {Minter} from "../src/Minter.sol";
 import {Vault} from "../src/Vault.sol";

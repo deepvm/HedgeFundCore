@@ -2,11 +2,11 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
-import {ERC20} from "openzeppelin-contracts/contracts/token/ERC20/ERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC7540Deposit, IERC7540Operator, IERC7540Redeem} from "forge-std/interfaces/IERC7540.sol";
 import {IERC7575} from "forge-std/interfaces/IERC7575.sol";
 import {IERC165} from "forge-std/interfaces/IERC165.sol";
-import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {HedgeFund} from "../src/HedgeFund.sol";
 
 contract MockAsset is ERC20 {
