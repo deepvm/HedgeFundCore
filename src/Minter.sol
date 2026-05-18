@@ -13,11 +13,11 @@ contract Minter is AccessControl, EIP712, Nonces {
     using SafeERC20 for IERC20;
 
     bytes32 public constant VAULT_ROLE = keccak256("VAULT_ROLE");
-    bytes32 public constant DEPOSIT_ROLE = keccak256("DEPOSIT_ROLE");
+    bytes32 public constant CUSTODY_ROLE = keccak256("CUSTODY_ROLE");
     bytes32 public constant SIGNER_ROLE = keccak256("SIGNER_ROLE");
 
     bytes32 public constant MINT_TYPEHASH =
-        keccak256("Mint(address account,address deposit,uint256 assets,uint256 nonce,uint256 deadline)");
+        keccak256("Mint(address account,address custody,uint256 assets,uint256 nonce,uint256 deadline)");
     bytes32 public constant BURN_TYPEHASH =
         keccak256("Burn(address account,uint256 assets,uint256 nonce,uint256 deadline)");
 
@@ -31,19 +31,19 @@ contract Minter is AccessControl, EIP712, Nonces {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
-    function mint(uint256 assets, address deposit, address signer, uint256 deadline, bytes calldata signature)
+    function mint(uint256 assets, address custody, address signer, uint256 deadline, bytes calldata signature)
         external
     {
-        _checkRole(DEPOSIT_ROLE, deposit);
+        _checkRole(CUSTODY_ROLE, custody);
         _checkPermit(
             signer,
             _hashTypedDataV4(
-                keccak256(abi.encode(MINT_TYPEHASH, msg.sender, deposit, assets, _useNonce(msg.sender), deadline))
+                keccak256(abi.encode(MINT_TYPEHASH, msg.sender, custody, assets, _useNonce(msg.sender), deadline))
             ),
             deadline,
             signature
         );
-        USDT.safeTransferFrom(msg.sender, deposit, assets);
+        USDT.safeTransferFrom(msg.sender, custody, assets);
         aUSD.mint(msg.sender, assets);
     }
 

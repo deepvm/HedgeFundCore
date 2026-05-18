@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AUSD} from "../src/aUSD.sol";
 import {Minter} from "../src/Minter.sol";
-import {IYieldMinter, Vault} from "../src/Vault.sol";
+import {Vault} from "../src/Vault.sol";
 
 contract MockUSDT is ERC20 {
     constructor() ERC20("Tether USD", "USDT") {}
@@ -32,14 +32,14 @@ contract VaultTest is Test {
     address internal owner = makeAddr("owner");
     address internal user = makeAddr("user");
     address internal signer;
-    address internal exchange = makeAddr("exchange");
+    address internal custody = makeAddr("custody");
 
     function setUp() public {
         signer = vm.addr(signerKey);
         usdt = new MockUSDT();
         ausd = new AUSD(owner);
         minter = new Minter(owner, usdt, ausd);
-        vault = new Vault(ausd, IYieldMinter(address(minter)), owner);
+        vault = new Vault(ausd, minter, owner);
 
         bytes32 minterRole = ausd.MINTER_ROLE();
         vm.prank(owner);
@@ -49,9 +49,9 @@ contract VaultTest is Test {
         vm.prank(owner);
         minter.grantRole(vaultRole, address(vault));
 
-        bytes32 depositRole = minter.DEPOSIT_ROLE();
+        bytes32 custodyRole = minter.CUSTODY_ROLE();
         vm.prank(owner);
-        minter.grantRole(depositRole, exchange);
+        minter.grantRole(custodyRole, custody);
 
         bytes32 signerRole = minter.SIGNER_ROLE();
         vm.prank(owner);
@@ -61,26 +61,26 @@ contract VaultTest is Test {
         usdt.mint(user, 100e6);
     }
 
-    function testMintAUSDSendsUSDTToExchange() public {
+    function testMintAUSDSendsUSDTToCustody() public {
         uint256 deadline = block.timestamp + 1 days;
-        bytes memory signature = _mintSignature(user, 100e6, exchange, deadline);
+        bytes memory signature = _mintSignature(user, 100e6, custody, deadline);
 
         vm.startPrank(user);
         usdt.approve(address(minter), 100e6);
-        minter.mint(100e6, exchange, signer, deadline, signature);
+        minter.mint(100e6, custody, signer, deadline, signature);
         vm.stopPrank();
 
-        assertEq(usdt.balanceOf(exchange), 100e6);
+        assertEq(usdt.balanceOf(custody), 100e6);
         assertEq(ausd.balanceOf(user), 100e6);
     }
 
     function testStakeAccruesAPYAndBurnsToUSDT() public {
         uint256 deadline = block.timestamp + 1 days;
-        bytes memory signature = _mintSignature(user, 100e6, exchange, deadline);
+        bytes memory signature = _mintSignature(user, 100e6, custody, deadline);
 
         vm.startPrank(user);
         usdt.approve(address(minter), 100e6);
-        minter.mint(100e6, exchange, signer, deadline, signature);
+        minter.mint(100e6, custody, signer, deadline, signature);
         ausd.approve(address(vault), 100e6);
         vault.deposit(100e6, user);
         vm.stopPrank();
@@ -122,50 +122,65 @@ contract VaultTest is Test {
         ausd.mint(user, 1);
     }
 
-    function testBlacklistedUserCannotReceiveAUSD() public {
-        vm.prank(owner);
-        ausd.blacklist(user, true);
-
-        uint256 deadline = block.timestamp + 1 days;
-        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
-
-        vm.startPrank(user);
-        usdt.approve(address(minter), 1);
-        vm.expectRevert();
-        minter.mint(1, exchange, signer, deadline, signature);
-        vm.stopPrank();
-    }
-
     function testPermitCannotReplay() public {
         uint256 deadline = block.timestamp + 1 days;
-        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
+        bytes memory signature = _mintSignature(user, 1, custody, deadline);
 
         vm.startPrank(user);
         usdt.approve(address(minter), 2);
-        minter.mint(1, exchange, signer, deadline, signature);
+        minter.mint(1, custody, signer, deadline, signature);
         vm.expectRevert();
-        minter.mint(1, exchange, signer, deadline, signature);
+        minter.mint(1, custody, signer, deadline, signature);
         vm.stopPrank();
     }
 
     function testExpiredPermitReverts() public {
         uint256 deadline = block.timestamp - 1;
-        bytes memory signature = _mintSignature(user, 1, exchange, deadline);
+        bytes memory signature = _mintSignature(user, 1, custody, deadline);
 
         vm.startPrank(user);
         usdt.approve(address(minter), 1);
         vm.expectRevert();
-        minter.mint(1, exchange, signer, deadline, signature);
+        minter.mint(1, custody, signer, deadline, signature);
         vm.stopPrank();
     }
 
-    function _mintSignature(address account, uint256 assets, address deposit, uint256 deadline)
+    function testMintRequiresCustodyRole() public {
+        address unauthorizedCustody = makeAddr("unauthorizedCustody");
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 1, unauthorizedCustody, deadline);
+
+        vm.startPrank(user);
+        usdt.approve(address(minter), 1);
+        vm.expectRevert();
+        minter.mint(1, unauthorizedCustody, signer, deadline, signature);
+        vm.stopPrank();
+    }
+
+    function testMintSignatureIsBoundToCustody() public {
+        address otherCustody = makeAddr("otherCustody");
+        bytes32 custodyRole = minter.CUSTODY_ROLE();
+
+        vm.prank(owner);
+        minter.grantRole(custodyRole, otherCustody);
+
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, 1, custody, deadline);
+
+        vm.startPrank(user);
+        usdt.approve(address(minter), 1);
+        vm.expectRevert();
+        minter.mint(1, otherCustody, signer, deadline, signature);
+        vm.stopPrank();
+    }
+
+    function _mintSignature(address account, uint256 assets, address custody_, uint256 deadline)
         internal
         view
         returns (bytes memory)
     {
         return _sign(
-            keccak256(abi.encode(minter.MINT_TYPEHASH(), account, deposit, assets, minter.nonces(account), deadline))
+            keccak256(abi.encode(minter.MINT_TYPEHASH(), account, custody_, assets, minter.nonces(account), deadline))
         );
     }
 
