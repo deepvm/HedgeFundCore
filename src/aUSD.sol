@@ -6,9 +6,6 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract AUSD is ERC20, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
-    mapping(address account => bool blocked) public blacklisted;
-
-    event BlacklistUpdated(address indexed account, bool status);
 
     constructor(address admin) ERC20("Altitude USD", "aUSD") {
         require(admin != address(0));
@@ -19,22 +16,11 @@ contract AUSD is ERC20, AccessControl {
         return 6;
     }
 
-    function blacklist(address account, bool status) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(account != address(0));
-        blacklisted[account] = status;
-        emit BlacklistUpdated(account, status);
-    }
-
     function mint(address to, uint256 assets) external onlyRole(MINTER_ROLE) {
         _mint(to, assets);
     }
 
     function burn(address from, uint256 assets) external onlyRole(MINTER_ROLE) {
         _burn(from, assets);
-    }
-
-    function _update(address from, address to, uint256 value) internal override {
-        require(!blacklisted[from] && !blacklisted[to]);
-        super._update(from, to, value);
     }
 }

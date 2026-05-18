@@ -4,20 +4,17 @@ pragma solidity 0.8.34;
 import {IERC20, ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-
-interface IYieldMinter {
-    function mintYield(uint256 assets) external;
-}
+import {Minter} from "./Minter.sol";
 
 contract Vault is ERC4626, AccessControl {
     uint256 private constant BPS = 10_000;
-    IYieldMinter public immutable minter;
+    Minter public immutable MINTER;
     uint256 public apy;
     uint256 public lastUpdate;
 
-    constructor(IERC20 asset_, IYieldMinter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
+    constructor(IERC20 asset_, Minter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
         require(admin != address(0) && address(minter_) != address(0));
-        minter = minter_;
+        MINTER = minter_;
         lastUpdate = block.timestamp;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
@@ -46,6 +43,6 @@ contract Vault is ERC4626, AccessControl {
     function _sync() private {
         uint256 yield = super.totalAssets() * apy * (block.timestamp - lastUpdate) / BPS / 365 days;
         lastUpdate = block.timestamp;
-        if (yield != 0) minter.mintYield(yield);
+        if (yield != 0) MINTER.mintYield(yield);
     }
 }
