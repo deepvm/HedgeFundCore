@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.34;
 
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20, ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {AUSD} from "./aUSD.sol";
-import {Minter} from "./Minter.sol";
+
+interface IYieldMinter {
+    function mintYield(uint256 assets) external;
+}
 
 contract Vault is ERC4626, AccessControl {
     uint256 private constant BPS = 10_000;
-    Minter public immutable minter;
+    IYieldMinter public immutable minter;
     uint256 public apy;
     uint256 public lastUpdate;
 
-    constructor(AUSD asset_, Minter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
+    constructor(IERC20 asset_, IYieldMinter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
         require(admin != address(0) && address(minter_) != address(0));
         minter = minter_;
         lastUpdate = block.timestamp;

@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AUSD} from "../src/aUSD.sol";
 import {Minter} from "../src/Minter.sol";
-import {Vault} from "../src/Vault.sol";
+import {IYieldMinter, Vault} from "../src/Vault.sol";
 
 contract MockUSDT is ERC20 {
     constructor() ERC20("Tether USD", "USDT") {}
@@ -39,7 +39,7 @@ contract VaultTest is Test {
         usdt = new MockUSDT();
         ausd = new AUSD(owner);
         minter = new Minter(owner, usdt, ausd);
-        vault = new Vault(ausd, minter, owner);
+        vault = new Vault(ausd, IYieldMinter(address(minter)), owner);
 
         bytes32 minterRole = ausd.MINTER_ROLE();
         vm.prank(owner);
