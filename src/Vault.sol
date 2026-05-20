@@ -30,6 +30,10 @@ contract Vault is ERC4626, AccessControl {
         assets += assets * apy * (block.timestamp - lastUpdate) / BPS / 365 days;
     }
 
+    function _decimalsOffset() internal pure override returns (uint8) {
+        return 18;
+    }
+
     function _transferIn(address from, uint256 assets) internal override {
         _sync();
         super._transferIn(from, assets);
