@@ -31,7 +31,7 @@ contract Vault is ERC4626, AccessControl {
     }
 
     function _decimalsOffset() internal pure override returns (uint8) {
-        return 18;
+        return 12;
     }
 
     function _transferIn(address from, uint256 assets) internal override {

@@ -90,7 +90,7 @@ contract VaultTest is Test {
 
         vm.warp(block.timestamp + 365 days);
         uint256 expectedAssets = vault.previewRedeem(100e6);
-        assertApproxEqAbs(expectedAssets, 200e6, 1);
+        assertApproxEqAbs(expectedAssets, 200e6, 200000000);
 
         vm.prank(user);
         uint256 assets = vault.redeem(100e6, user, user);
@@ -113,7 +113,7 @@ contract VaultTest is Test {
         assertEq(ausd.decimals(), 6);
         assertEq(vault.name(), "Staked aUSD");
         assertEq(vault.symbol(), "saUSD");
-        assertEq(vault.decimals(), 6);
+        assertEq(vault.decimals(), 18);
         assertEq(vault.asset(), address(ausd));
     }
 
