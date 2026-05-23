@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.34;
+pragma solidity 0.8.26;
 
 import {IERC20, ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
@@ -12,11 +12,11 @@ contract Vault is ERC4626, AccessControl {
     uint256 public apy;
     uint256 public lastUpdate;
 
-    constructor(IERC20 asset_, Minter minter_, address admin) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
-        require(admin != address(0) && address(minter_) != address(0));
+    constructor(address admin_, IERC20 asset_, Minter minter_) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
+        require(admin_ != address(0) && address(minter_) != address(0));
         MINTER = minter_;
         lastUpdate = block.timestamp;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
     function setAPY(uint256 apy_) external onlyRole(DEFAULT_ADMIN_ROLE) {

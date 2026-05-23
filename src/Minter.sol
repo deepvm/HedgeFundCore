@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity 0.8.34;
+pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -24,11 +24,11 @@ contract Minter is AccessControl, EIP712, Nonces {
     IERC20 public immutable USDT;
     AUSD public immutable aUSD;
 
-    constructor(address admin, IERC20 usdt_, AUSD ausd_) EIP712("aUSD Minter", "1") {
-        require(admin != address(0) && address(usdt_) != address(0) && address(ausd_) != address(0));
+    constructor(address admin_, IERC20 usdt_, AUSD ausd_) EIP712("aUSD Minter", "1") {
+        require(admin_ != address(0) && address(usdt_) != address(0) && address(ausd_) != address(0));
         USDT = usdt_;
         aUSD = ausd_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
     function mint(uint256 assets, address custody, address signer, uint256 deadline, bytes calldata signature)
