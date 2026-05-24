@@ -24,8 +24,14 @@ contract Minter is AccessControl, EIP712, Nonces {
     IERC20 public immutable USDT;
     AUSD public immutable aUSD;
 
+    error ZeroAddress();
+    error PermitExpired();
+    error InvalidSignature();
+
     constructor(address admin_, IERC20 usdt_, AUSD ausd_) EIP712("aUSD Minter", "1") {
-        require(admin_ != address(0) && address(usdt_) != address(0) && address(ausd_) != address(0));
+        if (admin_ == address(0) || address(usdt_) == address(0) || address(ausd_) == address(0)) {
+            revert ZeroAddress();
+        }
         USDT = usdt_;
         aUSD = ausd_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
@@ -63,8 +69,8 @@ contract Minter is AccessControl, EIP712, Nonces {
     }
 
     function _checkPermit(address signer, bytes32 digest, uint256 deadline, bytes calldata signature) private view {
-        require(block.timestamp <= deadline);
+        if (block.timestamp > deadline) revert PermitExpired();
         _checkRole(SIGNER_ROLE, signer);
-        require(SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature));
+        if (!SignatureChecker.isValidSignatureNowCalldata(signer, digest, signature)) revert InvalidSignature();
     }
 }

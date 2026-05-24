@@ -17,15 +17,19 @@ contract Vault is ERC4626, AccessControl {
     uint32 public apy;
     uint160 public remainder;
 
+    error ZeroAddress();
+
     constructor(address admin_, IERC20 asset_, Minter minter_) ERC20("Staked aUSD", "saUSD") ERC4626(asset_) {
-        require(admin_ != address(0) && address(minter_) != address(0));
+        if (admin_ == address(0) || address(minter_) == address(0)) {
+            revert ZeroAddress();
+        }
         MINTER = minter_;
         lastUpdate = block.timestamp.toUint64();
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
     function setAPY(uint256 apy_) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(apy_ <= BPS);
+        require(apy_ < BPS);
         _sync();
         apy = apy_.toUint32();
     }

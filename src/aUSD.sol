@@ -7,8 +7,10 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 contract AUSD is ERC20, AccessControl {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
+    error ZeroAddress();
+
     constructor(address admin_) ERC20("Altitude USD", "aUSD") {
-        require(admin_ != address(0));
+        if (admin_ == address(0)) revert ZeroAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin_);
     }
 
