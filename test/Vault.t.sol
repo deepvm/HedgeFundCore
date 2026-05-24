@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.26;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AUSD} from "../src/aUSD.sol";
 import {Minter} from "../src/Minter.sol";
@@ -113,7 +113,7 @@ contract VaultTest is Test {
         assertEq(ausd.decimals(), 6);
         assertEq(vault.name(), "Staked aUSD");
         assertEq(vault.symbol(), "saUSD");
-        assertEq(vault.decimals(), 18);
+        assertEq(vault.decimals(), 6);
         assertEq(vault.asset(), address(ausd));
     }
 
@@ -172,6 +172,66 @@ contract VaultTest is Test {
         vm.expectRevert();
         minter.mint(1, otherCustody, signer, deadline, signature);
         vm.stopPrank();
+    }
+
+    function testPrecisionLoss() public {
+        // 1. Create first Vault (with frequency sync)
+        uint256 depositAmount = 1e6; // 1 aUSD
+        uint256 deadline = block.timestamp + 1 days;
+        bytes memory signature = _mintSignature(user, depositAmount, custody, deadline);
+
+        vm.startPrank(user);
+        usdt.approve(address(minter), depositAmount);
+        minter.mint(depositAmount, custody, signer, deadline, signature);
+        ausd.approve(address(vault), depositAmount);
+        vault.deposit(depositAmount, user);
+        vm.stopPrank();
+
+        // 2. Create second Vault (cleanVault, without frequency sync)
+        Vault cleanVault = new Vault(owner, ausd, minter);
+        bytes32 vaultRole = minter.VAULT_ROLE();
+        vm.prank(owner);
+        minter.grantRole(vaultRole, address(cleanVault));
+
+        bytes32 minterRole = ausd.MINTER_ROLE();
+        vm.prank(owner);
+        ausd.grantRole(minterRole, address(this));
+        ausd.mint(user, depositAmount);
+        vm.prank(owner);
+        ausd.revokeRole(minterRole, address(this));
+
+        vm.startPrank(user);
+        ausd.approve(address(cleanVault), depositAmount);
+        cleanVault.deposit(depositAmount, user);
+        vm.stopPrank();
+
+        // 3. Set APY = 10% (1_000 BPS)
+        vm.prank(owner);
+        vault.setAPY(1_000);
+        vm.prank(owner);
+        cleanVault.setAPY(1_000);
+
+        // 4. Simulate 1200 steps for 5 minutes for first vault
+        vm.startPrank(user);
+        for (uint256 i = 0; i < 1200; i++) {
+            vm.warp(block.timestamp + 5 minutes);
+            vault.deposit(0, user);
+        }
+        vm.stopPrank();
+
+        // Balance first vault
+        uint256 assetsAfterFrequentSync = vault.totalAssets();
+        assertTrue(assetsAfterFrequentSync > depositAmount);
+
+        // Balance second vault
+        uint256 assetsAfterSingleSync = cleanVault.totalAssets();
+        assertTrue(assetsAfterSingleSync > depositAmount);
+
+        // Difference between the two vaults
+        assertApproxEqAbs(assetsAfterFrequentSync, assetsAfterSingleSync, 2);
+
+        console.log("Yield accrued with frequent syncs", assetsAfterFrequentSync - depositAmount);
+        console.log("Yield accrued with single sync", assetsAfterSingleSync - depositAmount);
     }
 
     function _mintSignature(address account, uint256 assets, address custody_, uint256 deadline)

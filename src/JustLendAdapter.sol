@@ -14,13 +14,13 @@ contract JustLendAdapter is AccessControl {
     using SafeERC20 for IERC20;
 
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
-    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
     IERC20 public immutable usdt;
     ITRC20JToken public immutable jUSDT;
     address public minter;
 
     constructor(address _admin, address _operator, address _minter, address _usdt, address _jUSDT) {
+        require(_minter != address(0));
         usdt = IERC20(_usdt);
         jUSDT = ITRC20JToken(_jUSDT);
 
@@ -33,11 +33,18 @@ contract JustLendAdapter is AccessControl {
 
     function deposit() external onlyRole(OPERATOR_ROLE) {
         uint256 uBalance = usdt.balanceOf(address(this));
-        require(jUSDT.mint(uBalance) == 0);
+        if (uBalance > 0) {
+            require(jUSDT.mint(uBalance) == 0);
+        }
     }
 
     function withdraw(uint256 amount) external onlyRole(OPERATOR_ROLE) {
         require(jUSDT.redeemUnderlying(amount) == 0);
         usdt.safeTransfer(minter, amount);
+    }
+
+    function setMinter(address _minter) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_minter != address(0));
+        minter = _minter;
     }
 }
