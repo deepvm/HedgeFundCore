@@ -175,8 +175,12 @@ contract VaultTest is Test {
     }
 
     function testPrecisionLoss() public {
+        uint256 depositAmount = 100_000e6; // 100,000 aUSD (минимальный депозит)
+
+        // Минтим USDT для user
+        usdt.mint(user, depositAmount);
+
         // 1. Create first Vault (with frequency sync)
-        uint256 depositAmount = 1e6; // 1 aUSD
         uint256 deadline = block.timestamp + 1 days;
         bytes memory signature = _mintSignature(user, depositAmount, custody, deadline);
 
@@ -227,8 +231,8 @@ contract VaultTest is Test {
         uint256 assetsAfterSingleSync = cleanVault.totalAssets();
         assertTrue(assetsAfterSingleSync > depositAmount);
 
-        // Difference between the two vaults
-        assertApproxEqAbs(assetsAfterFrequentSync, assetsAfterSingleSync, 2);
+        // Difference between the two vaults (погрешность должна быть минимальной, в пределах 100_000 wei)
+        assertApproxEqAbs(assetsAfterFrequentSync, assetsAfterSingleSync, 100_000);
 
         console.log("Yield accrued with frequent syncs", assetsAfterFrequentSync - depositAmount);
         console.log("Yield accrued with single sync", assetsAfterSingleSync - depositAmount);

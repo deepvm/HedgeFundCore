@@ -15,7 +15,6 @@ contract Vault is ERC4626, AccessControl {
 
     uint64 public lastUpdate;
     uint32 public apy;
-    uint160 public remainder;
 
     error ZeroAddress();
 
@@ -29,7 +28,7 @@ contract Vault is ERC4626, AccessControl {
     }
 
     function setAPY(uint256 apy_) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(apy_ < BPS);
+        require(apy_ <= BPS);
         _sync();
         apy = apy_.toUint32();
     }
@@ -37,7 +36,7 @@ contract Vault is ERC4626, AccessControl {
     function totalAssets() public view override returns (uint256 assets) {
         assets = super.totalAssets();
         uint256 timeElapsed = block.timestamp - lastUpdate;
-        assets += (assets * apy * timeElapsed + remainder) / (BPS * 365 days);
+        assets += (assets * apy * timeElapsed) / (BPS * 365 days);
     }
 
     function _transferIn(address from, uint256 assets) internal override {
@@ -52,11 +51,8 @@ contract Vault is ERC4626, AccessControl {
 
     function _sync() private {
         uint256 timeElapsed = block.timestamp - lastUpdate;
-        uint256 numerator = super.totalAssets() * apy * timeElapsed + remainder;
+        uint256 yield = (super.totalAssets() * apy * timeElapsed) / (BPS * 365 days);
         lastUpdate = block.timestamp.toUint64();
-        remainder = (numerator % (BPS * 365 days)).toUint160();
-
-        uint256 yield = numerator / (BPS * 365 days);
         if (yield != 0) MINTER.mintYield(yield);
     }
 }
