@@ -52,6 +52,11 @@ contract JustLendAdapter is AccessControl {
         usdt.safeTransfer(minter, amount);
     }
 
+    function withdrawTo(uint256 amount, address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (jUSDT.redeemUnderlying(amount) != 0) revert RedeemFailed();
+        usdt.safeTransfer(to, amount);
+    }
+
     function setMinter(address _minter) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (_minter == address(0)) revert ZeroAddress();
         minter = _minter;
